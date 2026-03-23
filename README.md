@@ -1,6 +1,6 @@
-# **Voice Chatbot Practice**
+# **LLM Game Project**
 ## 1. 프로젝트명
-시작이 제일 무서워 미룬이
+시작이 제일 무서워 미룬이 (게임 Ver.)
 
 **제목 출처**
 https://www.youtube.com/watch?v=yx1z7MbbKyM&list=RDyx1z7MbbKyM&start_radio=1
