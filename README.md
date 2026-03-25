@@ -2,8 +2,7 @@
 ## 1. 프로젝트명
 시작이 제일 무서워 미룬이 (게임 Ver.)
 
-**제목 출처**
-https://www.youtube.com/watch?v=yx1z7MbbKyM&list=RDyx1z7MbbKyM&start_radio=1
+**제목 출처**: https://www.youtube.com/watch?v=yx1z7MbbKyM&list=RDyx1z7MbbKyM&start_radio=1
 
 ## 2. 상세 설명
 기존의 챗봇(https://github.com/Yunu-Jeon/VOICE_Chatbot)이 사용자가 즉시 행동으로 옮기기에는 재미 요소가 부족하여 동기부여가 부족하다는 단점이 있다.
