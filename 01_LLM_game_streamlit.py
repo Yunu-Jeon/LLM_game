@@ -26,10 +26,10 @@ st.set_page_config(
 STATE_FILE = "tree_state.json"
 
 TREE_SHOP_ITEMS = [
-    {"name": "🪴나무 울타리", "price": 50, "desc": "나무 주변을 꾸며주는 울타리"},
-    {"name": "🚿물뿌리개", "price": 80, "desc": "나무 감성을 더하는 장식"},
-    {"name": "💚희귀 씨앗", "price": 120, "desc": "특별한 씨앗 장식"},
-    {"name": "💐꽃", "price": 70, "desc": "나무 주변을 꾸며주는 꽃"},
+    {"name": "나무 울타리", "price": 50, "desc": "나무 주변을 꾸며주는 울타리"},
+    {"name": "물뿌리개", "price": 80, "desc": "나무 감성을 더하는 장식"},
+    {"name": "희귀 씨앗", "price": 120, "desc": "특별한 씨앗 장식"},
+    {"name": "꽃", "price": 70, "desc": "나무 주변을 꾸며주는 꽃"},
 ]
 
 DEFAULT_GAME_STATE = {
@@ -569,8 +569,12 @@ def render_tree_html(stage: int, inventory: List[str]) -> str:
     if "나무 울타리" in inventory:
         extra += '<div class="fence"></div>'
 
-    if "꽃 화분" in inventory:
-        extra += '<div class="pot pot-left"></div><div class="pot pot-right"></div>'
+    if "꽃" in inventory:
+        extra += """
+            <div class="ground-flower gf-1"></div>
+            <div class="ground-flower gf-2"></div>
+            <div class="ground-flower gf-3"></div>
+        """
 
     if "물뿌리개" in inventory:
         extra += '<div class="watering-can"></div>'
@@ -794,9 +798,9 @@ def render_tree_html(stage: int, inventory: List[str]) -> str:
             background: radial-gradient(circle at center, #ffe07a 0 28%, #f7b7c9 29% 100%);
         }}
 
-        .flower-1 {{ left: 46%; bottom: 57%; }}
-        .flower-2 {{ left: 52%; bottom: 63%; }}
-        .flower-3 {{ left: 58%; bottom: 55%; }}
+        .flower-1 {{ left: 49%; bottom: 58%; }}
+        .flower-2 {{ left: 53%; bottom: 62%; }}
+        .flower-3 {{ left: 56%; bottom: 57%; }}
 
         .fruit {{
             width: 20px;
@@ -804,9 +808,34 @@ def render_tree_html(stage: int, inventory: List[str]) -> str:
             background: radial-gradient(circle at 35% 35%, #ffcd80, #d9892b);
         }}
 
-        .fruit-1 {{ left: 45%; bottom: 55%; }}
-        .fruit-2 {{ left: 52%; bottom: 61%; }}
-        .fruit-3 {{ left: 58%; bottom: 53%; }}
+        .fruit-1 {{ left: 48.5%; bottom: 55%; }}
+        .fruit-2 {{ left: 52.5%; bottom: 59%; }}
+        .fruit-3 {{ left: 56%; bottom: 54%; }}
+
+        .ground-flower {{
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: radial-gradient(circle at center, #ffe07a 0 28%, #f7b7c9 29% 100%);
+            box-shadow: 0 3px 6px rgba(0,0,0,0.10);
+        }}
+
+        .ground-flower::after {{
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 14px;
+            transform: translateX(-50%);
+            width: 2px;
+            height: 16px;
+            background: #6fa05f;
+            border-radius: 2px;
+        }}
+
+        .gf-1 {{ left: 20%; bottom: 16%; }}
+        .gf-2 {{ left: 24%; bottom: 14%; }}
+        .gf-3 {{ left: 28%; bottom: 16%; }}
 
         .fence {{
             position: absolute;
@@ -832,19 +861,6 @@ def render_tree_html(stage: int, inventory: List[str]) -> str:
                     transparent 18px 32px
                 );
         }}
-
-        .pot {{
-            position: absolute;
-            bottom: 12%;
-            width: 38px;
-            height: 28px;
-            background: linear-gradient(180deg, #c98a57, #95552c);
-            border-radius: 0 0 12px 12px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.10);
-        }}
-
-        .pot-left {{ left: 18%; }}
-        .pot-right {{ right: 18%; }}
 
         .watering-can {{
             position: absolute;
@@ -892,12 +908,11 @@ def render_tree_html(stage: int, inventory: List[str]) -> str:
     </body>
     </html>
     """
-
 # =========================================================
 # 10. 렌더링 함수
 # =========================================================
 def render_tree_panel() -> None:
-    st.subheader("나무를 키워봐")
+    st.subheader("🌳나무 시연🌳")
 
     step = st.session_state.game["step"]
     quests = st.session_state.game["quests"]
@@ -929,7 +944,7 @@ def render_tree_panel() -> None:
         unsafe_allow_html=True,
     )
 
-    st.subheader("성장 단계")
+    st.subheader("✅할 일 5단계 리스트✅")
     if quests:
         for i, q in enumerate(quests):
             if i < step:
@@ -943,7 +958,7 @@ def render_tree_panel() -> None:
 
 
 def render_chat() -> None:
-    st.subheader("코치")
+    st.subheader("💬채팅창💬")
     chat_box = st.container(height=460, border=True)
     with chat_box:
         for m in st.session_state.game["messages"]:
