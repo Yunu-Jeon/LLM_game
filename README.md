@@ -6,6 +6,7 @@
 사용자는 텍스트 또는 음성으로 현재 할 일을 입력할 수 있으며,  
 시스템은 이를 바탕으로 지금 당장 실행 가능한 작은 행동 단위로 작업을 나눈다.  
 각 단계를 완료할 때마다 나무가 성장하고, XP·코인·스탬프를 획득하게 된다.
+<img width="2856" height="1148" alt="image" src="https://github.com/user-attachments/assets/d8df3e31-8d1a-4a68-abae-fc2bf1e95041" />
 
 ---
 
