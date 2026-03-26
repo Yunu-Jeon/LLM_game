@@ -4,18 +4,26 @@ import re
 import time
 from copy import deepcopy
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
+
 import streamlit as st
 import streamlit.components.v1 as components
 from audio_recorder_streamlit import audio_recorder
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import BaseModel, Field
+
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, START, StateGraph
+
 
 # =========================================================
 # 1. 기본 설정
 # =========================================================
 load_dotenv()
-client = OpenAI()
+audio_client = OpenAI()
 
 st.set_page_config(
     page_title="시작이 제일 무서운 미룬이의 나무",
@@ -33,13 +41,14 @@ TREE_SHOP_ITEMS = [
 ]
 
 DEFAULT_GAME_STATE = {
-    "view": "tree",  # tree | shop
+    "view": "tree",
     "messages": [
         {
             "role": "assistant",
             "content": (
-                "안녕, 오늘 할 일을 말해줄래?.\n"
-                "내가 지금 너의 할 일을 당장 시작할 수 있게 5단계 퀘스트로 쪼개줄 거야. 퀘스트를 실행하면 나무가 점점 자라는 걸 볼 수 있어."
+                "안녕, 오늘 할 일을 말해줄래?\n"
+                "내가 지금 너의 할 일을 당장 시작할 수 있게 5단계 퀘스트로 쪼개줄 거야. "
+                "퀘스트를 실행하면 나무가 점점 자라는 걸 볼 수 있어."
             ),
         }
     ],
@@ -73,6 +82,7 @@ def load_game_state() -> Dict[str, Any]:
     return deepcopy(DEFAULT_GAME_STATE)
 
 
+
 def save_game_state() -> None:
     game_to_save = deepcopy(st.session_state.game)
     game_to_save["last_action_time"] = time.time()
@@ -83,6 +93,7 @@ def save_game_state() -> None:
             json.dump(game_to_save, f, ensure_ascii=False, indent=2)
     except Exception as e:
         st.warning(f"상태 저장 중 문제가 생겼어: {e}")
+
 
 
 def reset_game_state() -> None:
@@ -109,15 +120,17 @@ def add_message(role: str, content: str) -> None:
     st.session_state.game["messages"].append({"role": role, "content": content})
 
 
+
 def reset_idle_timer() -> None:
     st.session_state.game["last_action_time"] = time.time()
     st.session_state.game["show_popup"] = False
     save_game_state()
 
 
+
 def parse_deadline(deadline_text: str) -> Optional[datetime]:
     now = datetime.now()
-    deadline_text = deadline_text.strip()
+    deadline_text = str(deadline_text).strip()
 
     if not deadline_text or deadline_text == "미설정":
         return None
@@ -150,11 +163,13 @@ def parse_deadline(deadline_text: str) -> Optional[datetime]:
         return None
 
 
+
 def pretty_deadline(deadline_text: str) -> str:
     deadline_dt = parse_deadline(deadline_text)
     if deadline_dt is None:
         return "미설정"
     return deadline_dt.strftime("%Y-%m-%d %H:%M")
+
 
 
 def current_quest() -> Optional[str]:
@@ -165,9 +180,11 @@ def current_quest() -> Optional[str]:
     return None
 
 
+
 def is_progress_report(user_text: str) -> bool:
     keywords = ["완료", "했어", "끝냈어", "끝", "다음", "성공", "해냈어", "완수"]
     return any(k in user_text for k in keywords)
+
 
 
 def is_reset_request(user_text: str) -> bool:
@@ -175,15 +192,11 @@ def is_reset_request(user_text: str) -> bool:
     return any(k in user_text for k in keywords)
 
 
+
 def reward_for_step(step_number: int) -> int:
-    reward_table = {
-        1: 10,
-        2: 15,
-        3: 20,
-        4: 25,
-        5: 30,
-    }
+    reward_table = {1: 10, 2: 15, 3: 20, 4: 25, 5: 30}
     return reward_table.get(step_number, 0)
+
 
 
 def parse_quests(raw_quests: Any) -> List[str]:
@@ -204,26 +217,36 @@ def parse_quests(raw_quests: Any) -> List[str]:
 
 
 # =========================================================
-# 5. OpenAI 호출
+# 5. LangChain / LangGraph
 # =========================================================
-def transcribe_audio_to_text(audio_bytes: bytes) -> str:
-    temp_path = "temp_audio.wav"
-    with open(temp_path, "wb") as f:
-        f.write(audio_bytes)
-
-    with open(temp_path, "rb") as f:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f,
-        )
-
-    return transcript.text.strip()
+class PlanOutput(BaseModel):
+    task_title: str = Field(default="새 퀘스트", description="짧은 목표명")
+    inferred_state: str = Field(default="분석 전", description="사용자 상태 요약")
+    deadline_label: str = Field(default="미설정", description="오늘/내일/3일 뒤/미설정/날짜")
+    urgency: str = Field(default="정보 없음", description="매우 높음/중간/낮음/정보 없음")
+    quests: List[str] = Field(default_factory=list, description="5개의 구체적 퀘스트")
+    coach_message: str = Field(default="좋아, 한 단계씩 나무를 키워보자.", description="짧은 코치 메시지")
 
 
-def generate_plan_with_llm(user_goal: str) -> Dict[str, Any]:
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+class GraphState(TypedDict, total=False):
+    user_text: str
+    route: str
+    assistant_message: str
 
-    system_prompt = """
+
+@st.cache_resource
+def get_llm() -> ChatOpenAI:
+    return ChatOpenAI(model="gpt-4.1-mini", temperature=0.7)
+
+
+llm = get_llm()
+plan_llm = llm.with_structured_output(PlanOutput)
+
+plan_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
 당신은 '시작이 제일 무서운 미룬이의 나무' 게임의 계획 코치입니다.
 
 역할:
@@ -239,40 +262,76 @@ def generate_plan_with_llm(user_goal: str) -> Dict[str, Any]:
 - 사용자의 상태가 피곤하거나 부담이 크면 첫 단계는 아주 작게 만든다.
 - 데드라인이 촉박하면 필수 산출물 중심으로 구성한다.
 - 말투는 부드럽고 게임 코치 같아야 하며, 지나치게 독설적이면 안 된다.
-- 출력은 반드시 JSON 하나만 반환한다.
-
-JSON 형식:
-{
-  "task_title": "짧은 목표명",
-  "inferred_state": "사용자의 상태를 짧게 요약",
-  "deadline_label": "오늘/내일/3일 뒤/미설정/날짜",
-  "urgency": "매우 높음/중간/낮음/정보 없음",
-  "quests": ["...", "...", "...", "...", "..."],
-  "coach_message": "짧은 코치 메시지"
-}
-""".strip()
-
-    user_prompt = f"""
+            """.strip(),
+        ),
+        (
+            "human",
+            """
 현재 시각: {now_str}
 사용자 목표/입력: {user_goal}
 
 주의:
-- 사용자가 데드라인을 직접 말하지 않으면 deadline_label은 "미설정"으로 둔다.
+- 사용자가 데드라인을 직접 말하지 않으면 deadline_label은 '미설정'으로 둔다.
 - deadline_label과 urgency는 사용자의 입력을 기준으로 판단한다.
-""".strip()
+            """.strip(),
+        ),
+    ]
+)
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.7,
-        max_tokens=700,
-    )
+summary_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+당신은 게임 세션 회고 도우미입니다.
 
-    data = json.loads(response.choices[0].message.content)
+규칙:
+- 2문장 이내로 짧게 작성한다.
+- 비난하지 않는다.
+- 완료한 점을 먼저 짚고, 다음에 시도할 작은 행동 하나를 제안한다.
+- 말투는 부드럽고 게임 코치처럼 한다.
+            """.strip(),
+        ),
+        (
+            "human",
+            """
+목표: {task_title}
+완료 단계 수: {completed_count}
+누적 코인: {total_coins}
+            """.strip(),
+        ),
+    ]
+)
+
+summary_chain = summary_prompt | llm | StrOutputParser()
+
+
+
+def generate_plan_with_langchain(user_goal: str) -> Dict[str, Any]:
+    try:
+        plan = plan_prompt | plan_llm
+        result = plan.invoke(
+            {
+                "now_str": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "user_goal": user_goal,
+            }
+        )
+        data = result.model_dump()
+    except Exception:
+        data = {
+            "task_title": "새 퀘스트",
+            "inferred_state": "조금 막혀 있는 상태",
+            "deadline_label": "미설정",
+            "urgency": "정보 없음",
+            "quests": [
+                "작업 파일이나 필요한 창 하나만 열기",
+                "해야 할 일의 첫 줄이나 첫 문장만 적기",
+                "관련 자료 1개만 확인하고 핵심 1개 메모하기",
+                "메모를 바탕으로 본문을 3~5줄 진행하기",
+                "지금 한 내용을 저장하고 다음 시작 지점을 적기",
+            ],
+            "coach_message": "좋아, 아주 작은 시작부터 나무를 키워보자.",
+        }
 
     data.setdefault("task_title", "새 퀘스트")
     data.setdefault("inferred_state", "분석 전")
@@ -284,117 +343,168 @@ JSON 형식:
     data["quests"] = parse_quests(data["quests"])
     while len(data["quests"]) < 5:
         data["quests"].append("작은 행동 한 단계 더 정리하기")
-
+    data["quests"] = data["quests"][:5]
     return data
 
 
-def summarize_session_with_llm(task_title: str, completed_count: int, total_coins: int) -> str:
-    system_prompt = """
-당신은 게임 세션 회고 도우미입니다.
 
-규칙:
-- 2문장 이내로 짧게 작성한다.
-- 비난하지 않는다.
-- 완료한 점을 먼저 짚고, 다음에 시도할 작은 행동 하나를 제안한다.
-- 말투는 부드럽고 게임 코치처럼 한다.
-""".strip()
-
-    user_prompt = f"""
-목표: {task_title}
-완료 단계 수: {completed_count}
-누적 코인: {total_coins}
-""".strip()
-
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.7,
-        max_tokens=200,
-    )
-
-    return response.choices[0].message.content.strip()
+def summarize_session_with_langchain(task_title: str, completed_count: int, total_coins: int) -> str:
+    try:
+        result = summary_chain.invoke(
+            {
+                "task_title": task_title,
+                "completed_count": completed_count,
+                "total_coins": total_coins,
+            }
+        )
+        return result.strip()
+    except Exception:
+        return "좋아, 여기까지 온 것만으로도 이미 진전이야. 다음에는 첫 단계 하나만 다시 시작해보자."
 
 
-# =========================================================
-# 6. 게임 로직
-# =========================================================
-def start_new_plan(user_text: str) -> None:
-    plan = generate_plan_with_llm(user_text)
 
-    st.session_state.game["task_title"] = plan["task_title"]
-    st.session_state.game["task_context"] = user_text
-    st.session_state.game["deadline_raw"] = plan["deadline_label"]
-    st.session_state.game["deadline_label"] = pretty_deadline(plan["deadline_label"])
-    st.session_state.game["urgency"] = plan["urgency"] if plan["deadline_label"] != "미설정" else "정보 없음"
-    st.session_state.game["inferred_state"] = plan["inferred_state"]
-    st.session_state.game["quests"] = plan["quests"]
-    st.session_state.game["step"] = 0
+def route_input_node(state: GraphState) -> GraphState:
+    user_text = state["user_text"].strip()
+    game = st.session_state.game
 
-    task_lines = "\n".join([f"{i+1}. {q}" for i, q in enumerate(plan["quests"])])
+    no_active_plan = len(game["quests"]) == 0
+    finished_plan = len(game["quests"]) > 0 and game["step"] >= len(game["quests"])
 
+    if no_active_plan or finished_plan or is_reset_request(user_text):
+        return {"route": "start_plan"}
+    if is_progress_report(user_text):
+        return {"route": "complete_step"}
+    return {"route": "reply_current_status"}
+
+
+
+def start_plan_node(state: GraphState) -> GraphState:
+    user_text = state["user_text"]
+    plan = generate_plan_with_langchain(user_text)
+    game = st.session_state.game
+
+    game["task_title"] = plan["task_title"]
+    game["task_context"] = user_text
+    game["deadline_raw"] = plan["deadline_label"]
+    game["deadline_label"] = pretty_deadline(plan["deadline_label"])
+    game["urgency"] = plan["urgency"] if plan["deadline_label"] != "미설정" else "정보 없음"
+    game["inferred_state"] = plan["inferred_state"]
+    game["quests"] = plan["quests"]
+    game["step"] = 0
+
+    task_lines = "\n".join([f"{i + 1}. {q}" for i, q in enumerate(plan["quests"])])
     assistant_msg = (
-        f"🌳 **오늘의 나무 목표: {plan['task_title']}**\n\n"
+        f"🌳 **오늘의 목표: {plan['task_title']}**\n\n"
         f"- 현재 상태: {plan['inferred_state']}\n"
-        f"- 데드라인: {st.session_state.game['deadline_label']}\n"
-        f"- 긴급도: {st.session_state.game['urgency']}\n\n"
+        f"- 데드라인: {game['deadline_label']}\n"
+        f"- 긴급도: {game['urgency']}\n\n"
         f"{plan['coach_message']}\n\n"
         f"**5단계 성장 계획**\n{task_lines}"
     )
-    add_message("assistant", assistant_msg)
-    save_game_state()
+    return {"assistant_message": assistant_msg}
 
 
-def complete_current_step() -> None:
-    if not st.session_state.game["quests"]:
-        add_message("assistant", "아직 심어진 목표가 없어. 먼저 오늘 할 일을 하나 정해보자.")
-        save_game_state()
-        return
 
-    if st.session_state.game["step"] >= len(st.session_state.game["quests"]):
-        add_message("assistant", "이미 이 나무는 다 자랐어. 새 목표를 심어볼까?")
-        save_game_state()
-        return
+def complete_step_node(state: GraphState) -> GraphState:
+    game = st.session_state.game
 
-    finished_quest = st.session_state.game["quests"][st.session_state.game["step"]]
-    step_number = st.session_state.game["step"] + 1
+    if not game["quests"]:
+        return {"assistant_message": "아직 심어진 목표가 없어. 먼저 오늘 할 일을 하나 정해보자."}
+
+    if game["step"] >= len(game["quests"]):
+        return {"assistant_message": "이미 이 나무는 다 자랐어. 새 목표를 심어볼까?"}
+
+    finished_quest = game["quests"][game["step"]]
+    step_number = game["step"] + 1
     reward = reward_for_step(step_number)
 
-    st.session_state.game["step"] += 1
-    st.session_state.game["coins"] += reward
+    game["step"] += 1
+    game["coins"] += reward
 
-    if st.session_state.game["step"] == len(st.session_state.game["quests"]):
-        st.session_state.game["coins"] += 40
-
-        summary = summarize_session_with_llm(
-            task_title=st.session_state.game["task_title"],
-            completed_count=len(st.session_state.game["quests"]),
-            total_coins=st.session_state.game["coins"],
+    if game["step"] == len(game["quests"]):
+        game["coins"] += 40
+        summary = summarize_session_with_langchain(
+            task_title=game["task_title"],
+            completed_count=len(game["quests"]),
+            total_coins=game["coins"],
         )
-        st.session_state.game["recent_summaries"].append(summary)
-
-        add_message(
-            "assistant",
-            (
-                f"🍎 **완주!** 방금 끝낸 단계는 **{finished_quest}**였어.\n"
-                f"나무가 끝까지 자라서 열매를 맺었어. 완주 보너스까지 획득! (+{reward + 40} 코인)\n\n"
-                f"{summary}"
-            ),
+        game["recent_summaries"].append(summary)
+        assistant_msg = (
+            f"🍎 **완주!** 방금 끝낸 단계는 **{finished_quest}**였어.\n"
+            f"나무가 끝까지 자라서 열매를 맺었어. 완주 보너스까지 획득! (+{reward + 40} 코인)\n\n"
+            f"{summary}"
         )
-    else:
-        next_q = current_quest()
-        add_message(
-            "assistant",
-            (
-                f"🌱 좋아, **{finished_quest}** 완료.\n"
-                f"나무가 한 단계 자랐어. (+{reward} 코인)\n\n"
-                f"다음 퀘스트는 **{next_q}**야."
-            ),
+        return {"assistant_message": assistant_msg}
+
+    next_q = current_quest()
+    assistant_msg = (
+        f"🌱 좋아, **{finished_quest}** 완료.\n"
+        f"나무가 한 단계 자랐어. (+{reward} 코인)\n\n"
+        f"다음 퀘스트는 **{next_q}**야."
+    )
+    return {"assistant_message": assistant_msg}
+
+
+
+def reply_current_status_node(state: GraphState) -> GraphState:
+    if current_quest():
+        return {
+            "assistant_message": (
+                f"지금 진행 중인 작업은 **{current_quest()}**야.\n"
+                f"끝났으면 '완료'라고 말해주고, 목표를 바꾸고 싶으면 '다시'라고 말해줘."
+            )
+        }
+    return {"assistant_message": "좋아, 새 목표를 심어보자."}
+
+
+
+def route_selector(state: GraphState) -> str:
+    return state["route"]
+
+
+@st.cache_resource
+def build_game_graph():
+    workflow = StateGraph(GraphState)
+    workflow.add_node("route_input", route_input_node)
+    workflow.add_node("start_plan", start_plan_node)
+    workflow.add_node("complete_step", complete_step_node)
+    workflow.add_node("reply_current_status", reply_current_status_node)
+
+    workflow.add_edge(START, "route_input")
+    workflow.add_conditional_edges(
+        "route_input",
+        route_selector,
+        {
+            "start_plan": "start_plan",
+            "complete_step": "complete_step",
+            "reply_current_status": "reply_current_status",
+        },
+    )
+    workflow.add_edge("start_plan", END)
+    workflow.add_edge("complete_step", END)
+    workflow.add_edge("reply_current_status", END)
+    return workflow.compile()
+
+
+game_graph = build_game_graph()
+
+
+# =========================================================
+# 6. 음성 인식 + 입력 처리
+# =========================================================
+def transcribe_audio_to_text(audio_bytes: bytes) -> str:
+    temp_path = "temp_audio.wav"
+    with open(temp_path, "wb") as f:
+        f.write(audio_bytes)
+
+    with open(temp_path, "rb") as f:
+        transcript = audio_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
         )
 
-    save_game_state()
+    return transcript.text.strip()
+
 
 
 def handle_user_input(user_text: str) -> None:
@@ -406,32 +516,11 @@ def handle_user_input(user_text: str) -> None:
     add_message("user", user_text)
     save_game_state()
 
-    no_active_plan = len(st.session_state.game["quests"]) == 0
-    finished_plan = (
-        len(st.session_state.game["quests"]) > 0
-        and st.session_state.game["step"] >= len(st.session_state.game["quests"])
-    )
-
-    if no_active_plan or finished_plan or is_reset_request(user_text):
-        start_new_plan(user_text)
-        return
-
-    if is_progress_report(user_text):
-        complete_current_step()
-        return
-
-    if current_quest():
-        add_message(
-            "assistant",
-            (
-                f"지금 진행 중인 작업은 **{current_quest()}**야.\n"
-                f"끝났으면 '완료'라고 말해주고, 목표를 바꾸고 싶으면 '다시'라고 말해줘."
-            ),
-        )
-    else:
-        add_message("assistant", "좋아, 새 목표를 심어보자.")
-
+    result = game_graph.invoke({"user_text": user_text})
+    assistant_message = result.get("assistant_message", "좋아, 한 단계씩 진행해보자.")
+    add_message("assistant", assistant_message)
     save_game_state()
+
 
 
 def buy_item(item: Dict[str, Any]) -> None:
@@ -550,7 +639,7 @@ if st.session_state.game["show_popup"]:
         """
         <div class="idle-popup">
             <h3>🌾오랫동안 입력을 하지 않았군</h3>
-            <p>한동안 입력이 없었어. 다시 시작해볼까?.</p>
+            <p>한동안 입력이 없었어. 다시 시작해볼까?</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -908,8 +997,10 @@ def render_tree_html(stage: int, inventory: List[str]) -> str:
     </body>
     </html>
     """
+
+
 # =========================================================
-# 10. 렌더링 함수
+# 11. 렌더링 함수
 # =========================================================
 def render_tree_panel() -> None:
     st.subheader("🌳나무 시연🌳")
@@ -931,13 +1022,13 @@ def render_tree_panel() -> None:
     st.markdown(
         f"""
         <div class="status-card">
-            <b>현재 목표</b>: {st.session_state.game["task_title"] or "아직 없음"}<br>
-            <b>현재 상태</b>: {st.session_state.game["inferred_state"]}<br>
-            <b>데드라인</b>: {st.session_state.game["deadline_label"]}<br>
-            <b>긴급도</b>: {st.session_state.game["urgency"]}<br>
+            <b>현재 목표</b>: {st.session_state.game['task_title'] or '아직 없음'}<br>
+            <b>현재 상태</b>: {st.session_state.game['inferred_state']}<br>
+            <b>데드라인</b>: {st.session_state.game['deadline_label']}<br>
+            <b>긴급도</b>: {st.session_state.game['urgency']}<br>
             <b>현재 단계</b>: {step} / 5<br>
             <b>현재 작업</b>: {current_text}<br>
-            <b>코인</b>: {st.session_state.game["coins"]}<br>
+            <b>코인</b>: {st.session_state.game['coins']}<br>
             <b>보유 장식</b>: {inventory_text}
         </div>
         """,
@@ -954,7 +1045,8 @@ def render_tree_panel() -> None:
             else:
                 st.write(f"▫️ {q}")
     else:
-        st.info("아직 심어진 목표가 없어. 새 목표를 입력해줘.")
+        st.info("새 목표를 입력해줘!")
+
 
 
 def render_chat() -> None:
@@ -965,6 +1057,7 @@ def render_chat() -> None:
             avatar = "🌳" if m["role"] == "assistant" else "👤"
             with st.chat_message(m["role"], avatar=avatar):
                 st.write(m["content"])
+
 
 
 def render_shop() -> None:
@@ -1018,7 +1111,7 @@ def render_shop() -> None:
 
 
 # =========================================================
-# 11. 화면 분기
+# 12. 화면 분기
 # =========================================================
 if st.session_state.game["view"] == "tree":
     left, right = st.columns([1.2, 1], gap="large")
